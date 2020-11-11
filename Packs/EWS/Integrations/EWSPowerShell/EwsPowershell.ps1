@@ -5,7 +5,7 @@ $global:COMMAND_PREFIX = "o365-sc"
 $global:INTEGRATION_CONTEXT = $Demisto.getIntegrationContext()
 $global:INTEGRATION_ENTRY_CONTEX = "O365.SecurityAndCompliance"
 $global:COMPLAIANCE_SEARCH_ENTRY_CONTEXT = "$global:INTEGRATION_ENTRY_CONTEX.Search(val.Name && val.Name == obj.Name)"
-$global:COMPLAIANCE_SEARCH_ACTIONS_ENTRY_CONTEXT = "$global:INTEGRATION_ENTRY_CONTEX.SearchActions(val.Name && val.Name == obj.Name)"
+$global:COMPLAIANCE_SEARCH_ACTIONS_ENTRY_CONTEXT = "$global:INTEGRATION_ENTRY_CONTEX.SearchAction(val.Name && val.Name == obj.Name)"
 
 
 #### HELPER FUNCTIONS ####
@@ -36,9 +36,15 @@ function UpdateIntegrationContext([OAuth2DeviceCodeClient]$client){
 
 function CreateNewSession([string]$uri, [string]$upn, [string]$bearer_token) {
     $tokenValue = ConvertTo-SecureString "Bearer $bearer_token" -AsPlainText -Force
-    $credential = New-Object System.Management.Automation.PSCredential($upn, $tokenValue) 
-    $uri = "https://eur01b.ps.compliance.protection.outlook.com/powershell-liveid?BasicAuthToOAuthConversion=true;PSVersion=7.0.3"
-    $session = New-PSSession -ConfigurationName Microsoft.Exchange -ConnectionUri $uri -Credential $credential -Authentication Basic -AllowRedirection
+    $credential = New-Object System.Management.Automation.PSCredential($upn, $tokenValue)
+    $sessions_params = @{
+        "ConfigurationName" = "Microsoft.Exchange"
+        "ConnectionUri" = $uri
+        "Credential" = $credential
+        "Authentication" = "Basic"
+        "AllowRedirection" = $true
+    }
+    $session = New-PSSession @sessions_params
 
 	if (!$session) {
 		throw "Fail - establishing session to $uri"
@@ -79,7 +85,7 @@ function ParseSuccessResults([string]$success_results) {
             {
                 $parsed_success_results.Add(@{
                     "Location" = $matches[1]
-                    "Items count" = $matches[2]
+                    "ItemsCount" = $matches[2]
                     "Size" = $matches[3]
                 })
             }
@@ -108,14 +114,15 @@ function ParseResults([string]$results) {
         $lines = $results.Split("Location")
         foreach ($line in $lines)
         {
-            if ($line -match ': (\S+); Sender: ([\S ]+); Type: (\S+); Size: (\d+); Received Time: ([\S\d ]+);')
+            if ($line -match ': (\S+); Sender: ([\S ]+); Type: (\S+); Size: (\d+); Received Time: ([\S\d ]+); Data Link: ([\S\d]+),')
             {
                 $parsed_results.Add(@{
                     "Location" = $matches[1]
                     "Subject" = $matches[2]
                     "Type" = $matches[3]
                     "Size" = $matches[4]
-                    "Received Time" = $matches[5]
+                    "ReceivedTime" = $matches[5]
+                    "DataLink" = $matches[6]
                 })
             }
         }
@@ -192,7 +199,7 @@ function ParseSearchToEntryContext([psobject]$search) {
     #>
 }
 
-function ParseSearchActionsToEntryContext([psobject]$search_action) {
+function ParseSearchActionToEntryContext([psobject]$search_action) {
     return @{
         "Action" = $search_action.Action
         "AllowNotFoundExchangeLocationsEnabled" = $search_action.AllowNotFoundExchangeLocationsEnabled
@@ -235,7 +242,7 @@ function ParseSearchActionsToEntryContext([psobject]$search_action) {
         SearchAction raw psobject.
 
         .EXAMPLE
-        ParseSearchActionsToEntryContext $search_action
+        ParseSearchActionToEntryContext $search_action
 
         .OUTPUTS
         SearchAction entry context.
@@ -352,8 +359,8 @@ class OAuth2DeviceCodeClient {
             "Method" = "Post"
             "Headers" = (New-Object "System.Collections.Generic.Dictionary[[String],[String]]").Add("Content-Type", "application/x-www-form-urlencoded")
             "Body" = "client_id=$($this.application_id)&scope=$($this.application_scope)"
-            "NoProxy" = !$this.proxy
-            "SkipCertificateCheck" = !$this.insecure
+            "NoProxy" = $this.proxy
+            "SkipCertificateCheck" = $this.insecure
         }
         $response = Invoke-WebRequest @params
         $response_body = ConvertFrom-Json $response.Content
@@ -387,8 +394,8 @@ class OAuth2DeviceCodeClient {
                 "Method" = "Post"
                 "Headers" = (New-Object "System.Collections.Generic.Dictionary[[String],[String]]").Add("Content-Type", "application/x-www-form-urlencoded")
                 "Body" = "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code&code=$($this.device_code)&client_id=$($this.application_id)"
-                "NoProxy" = !$this.proxy
-                "SkipCertificateCheck" = !$this.insecure
+                "NoProxy" = $this.proxy
+                "SkipCertificateCheck" = $this.insecure
             }
             $response = Invoke-WebRequest @params
             $response_body = ConvertFrom-Json $response.Content
@@ -437,8 +444,8 @@ class OAuth2DeviceCodeClient {
                 "Method" = "Post"
                 "Headers" = (New-Object "System.Collections.Generic.Dictionary[[String],[String]]").Add("Content-Type", "application/x-www-form-urlencoded")
                 "Body" = "grant_type=refresh_token&client_id=$($this.application_id)&refresh_token=$($this.refresh_token)&scope=$($this.application_scope)"
-                "NoProxy" = !$this.proxy
-                "SkipCertificateCheck" = !$this.insecure
+                "NoProxy" = $this.proxy
+                "SkipCertificateCheck" = $this.insecure
             }
             $response = Invoke-WebRequest @params
             $response_body = ConvertFrom-Json $response.Content
@@ -549,11 +556,11 @@ class SecurityAndComplianceClient {
     [bool]$proxy
     
     SecurityAndComplianceClient([string]$uri, [string]$upn, [string]$bearer_token, [bool]$insecure, [bool]$proxy) {
-        $this.uri = $uri
         $this.upn = $upn
         $this.bearer_token = $bearer_token
         $this.insecure = $insecure
         $this.proxy = $proxy
+        $this.uri = $this.GetRedirectUri($uri)
         <#
             .DESCRIPTION
             SecurityAndComplianceClient connect to Security & Compliance Center using powershell session (OAuth2.0) and allow interact with it.
@@ -576,16 +583,54 @@ class SecurityAndComplianceClient {
             .EXAMPLE
             $cs_client = [SecurityAndComplianceClient]::new("outlook.com", "user@microsoft.com", "dfhsdkjhkjhvkdvbihsgiu")
 
-            .NOTES
-            1. Linux issues compatability - 
-                a. Unable to redirect correctly to right uri - Therefor use https://eur01b.ps.compliance.protection.outlook.com/powershell-liveid?BasicAuthToOAuthConversion=true;PSVersion=7.0.3
-                b. For windows it should be - https://ps.compliance.protection.outlook.com/powershell-liveid?BasicAuthToOAuthConversion=true;PSVersion=7.0.3
-
             .LINK
             https://docs.microsoft.com/en-us/powershell/module/exchange/?view=exchange-ps#policy-and-compliance-content-search
         #>
     }
 
+    [string]GetRedirectUri([string]$uri) {
+        $end_uri = $uri
+
+        if ($this.bearer_token) {
+            $token_value = ConvertTo-SecureString "Bearer $($this.bearer_token)" -AsPlainText -Force
+            $credential = New-Object System.Management.Automation.PSCredential($this.upn, $token_value)
+            $params = @{
+                "URI" = "https://$uri/powershell-liveid?BasicAuthToOAuthConversion=true;PSVersion=7.0.3"
+                "Method" = "Post"
+                "Credential" = $credential
+                "NoProxy" = $this.proxy
+                "SkipCertificateCheck" = $this.insecure
+                "MaximumRedirection" = 0
+            }
+            try {
+                Invoke-WebRequest @params
+            }
+            catch {
+                if ($_.Exception.Response.StatusCode -eq "Redirect") {
+                    $end_uri = $_.Exception.Response.Headers.Location.AbsoluteUri
+                } else {
+                    throw $_.Exception
+                }
+            }
+        }
+    
+        return $end_uri
+        <#
+            .DESCRIPTION
+            Solve Bug - When using bearer token the new-pssession unable to get redirect url for establishing pssession.
+            This function get redirect URI by interacting with WSMAN directly via Rest-API.
+    
+            .PARAMETER uri
+            Security & Compliance Center uri.
+    
+            .OUTPUTS
+            [string] Redirect uri if redirected. 
+            
+            .LINK
+            https://github.com/PowerShell/PowerShell/issues/12563
+        #>
+    }
+    
     CreateSession() {
         $this.session = CreateNewSession $this.uri $this.upn $this.bearer_token
         <#
@@ -624,8 +669,9 @@ class SecurityAndComplianceClient {
             # Establish session to remote
             $this.CreateSession()
             # Import and Execute command
-            Import-PSSession -Session $this.session -CommandName New-ComplianceSearch
+            Import-PSSession -Session $this.session -CommandName New-ComplianceSearch -AllowClobber
             $parameters = @{
+                "Name" = $search_name
                 "Case" = $case
                 "ContentMatchQuery" = $kql
                 "Description" = $description
@@ -636,7 +682,7 @@ class SecurityAndComplianceClient {
                 "SharePointLocation" = $share_point_location
                 "SharePointLocationExclusion" = $share_point_location_exclusion
             }
-            $response = New-ComplianceSearch -Name $search_name @parameters
+            $response = New-ComplianceSearch @parameters
             
             return $response
         }
@@ -646,7 +692,7 @@ class SecurityAndComplianceClient {
         }
         <#
             .DESCRIPTION
-            Create compliance searches in the Security & Compliance Center.
+            Create compliance search in the Security & Compliance Center.
 
             .PARAMETER search_name
             The name of the compliance search.
@@ -690,41 +736,43 @@ class SecurityAndComplianceClient {
         #>
 	}
 
-    [psobject]SetSearch([string]$search_name,  [string]$case, [string]$kql, [string]$description, [bool]$allow_not_found_exchange_locations, [string[]]$exchange_location,
-                        [string[]]$exchange_location_exclusion, [string[]]$public_folder_location, [string[]]$share_point_location, [string[]]$share_point_location_exclusion) {
+    SetSearch([string]$search_name, [string]$kql, [string]$description, [bool]$allow_not_found_exchange_locations, [string[]]$add_exchange_location,
+              [string[]]$add_exchange_location_exclusion, [string[]]$add_public_folder_location, [string[]]$add_share_point_location, [string[]]$add_share_point_location_exclusion,
+              [string[]]$remove_exchange_location, [string[]]$remove_exchange_location_exclusion, [string[]]$remove_public_folder_location, [string[]]$remove_share_point_location,
+              [string[]]$remove_share_point_location_exclusion) {
 		try{
             # Establish session to remote
             $this.CreateSession()
             # Import and Execute command
-            Import-PSSession -Session $this.session -CommandName New-ComplianceSearch
-            $parameters = @{
-                "Case" = $case
+            Import-PSSession -Session $this.session -CommandName Set-ComplianceSearch -AllowClobber
+            $cmd_params = @{
+                "Identity" = $search_name
                 "ContentMatchQuery" = $kql
                 "Description" = $description
                 "AllowNotFoundExchangeLocationsEnabled" = $allow_not_found_exchange_locations
-                "ExchangeLocation" = $exchange_location
-                "ExchangeLocationExclusion" = $exchange_location_exclusion
-                "PublicFolderLocation" = $public_folder_location
-                "SharePointLocation" = $share_point_location
-                "SharePointLocationExclusion" = $share_point_location_exclusion
+                "AddExchangeLocation" = $add_exchange_location
+                "AddExchangeLocationExclusion" = $add_exchange_location_exclusion
+                "PublicFolderLocation" = $add_public_folder_location
+                "AddSharePointLocation" = $add_share_point_location
+                "AddSharePointLocationExclusion" = $add_share_point_location_exclusion
+                "RemoveExchangeLocation" = $remove_exchange_location
+                "RemoveExchangeLocationExclusion" = $remove_exchange_location_exclusion
+                "RemovePublicFolderLocation" = $remove_public_folder_location
+                "RemoveSharePointLocation" = $remove_share_point_location
+                "RemoveSharePointLocationExclusion" = $remove_share_point_location_exclusion
             }
-            $response = New-ComplianceSearch -Name $search_name @parameters
-            
-            return $response
-        }
+            Set-ComplianceSearch @cmd_params
+        } 
         finally {
             # Close session to remote
             $this.CloseSession()
         }
         <#
             .DESCRIPTION
-            Create compliance searches in the Security & Compliance Center.
+            Set compliance search in the Security & Compliance Center.
 
             .PARAMETER search_name
             The name of the compliance search.
-            
-            .PARAMETER case
-            Name of a Core eDiscovery case to associate the new compliance search with.
             
             .PARAMETER kql
             Text search string or a query that's formatted by using the Keyword Query Language (KQL).
@@ -735,30 +783,41 @@ class SecurityAndComplianceClient {
             .PARAMETER allow_not_found_exchange_locations
             Whether to include mailboxes other than regular user mailboxes in the compliance search.
 
-            .PARAMETER exchange_location
-            Mailboxes to include.
+            .PARAMETER add_exchange_location
+            Add mailboxes to include.
 
-            .PARAMETER exchange_location_exclusion
-            Mailboxes to exclude when you use the value "All" for the exchange_location parameter.
+            .PARAMETER add_exchange_location_exclusion
+            Add mailboxes to exclude when you use the value "All" for the exchange_location parameter.
 
-            .PARAMETER public_folder_location
-            Whether to include all public folders in the search.
+            .PARAMETER add_public_folder_location
+            Add public folders to include.
 
-            .PARAMETER share_point_location
-            SharePoint Online sites to include. You identify the site by its URL value, or you can use the value All to include all sites.
+            .PARAMETER add_share_point_location
+            Add sharePoint online sites to include. You identify the site by its URL value.
 
-            .PARAMETER share_point_location_exclusion
-            SharePoint Online sites to exclude when you use the value All for the SharePointLocation parameter. You identify the site by its URL value.
+            .PARAMETER add_share_point_location_exclusion
+            Add sharePoint online sites to exclude when you use the value "All" for the SharePointLocation parameter. You identify the site by its URL value.
 
-            .EXAMPLE
-            $client.NewSearch("new-search")
-            $client.NewSearch("new-search", "new-search-description")
+            .PARAMETER remove_exchange_location
+            Remove mailboxes to include.
+
+            .PARAMETER remove_exchange_location_exclusion
+            Remove mailboxes to exclude when you use the value "All" for the exchange_location parameter.
+
+            .PARAMETER remove_public_folder_location
+            Remove public folders to include.
+
+            .PARAMETER remove_share_point_location
+            Remove sharePoint online sites to include. You identify the site by its URL value.
+
+            .PARAMETER remove_share_point_location_exclusion
+            Remove sharePoint online sites to exclude when you use the value "All" for the exchange_location (Used in create new compliance search) argument or share_point_location argument. You identify the site by its URL value.            
             
-            .OUTPUTS
-            psobject - Raw response.
+            .EXAMPLE
+            $client.SetSearch("new-search", "new-search-description")
             
             .LINK
-            https://docs.microsoft.com/en-us/powershell/module/exchange/new-compliancesearch?view=exchange-ps
+            https://docs.microsoft.com/en-us/powershell/module/exchange/set-compliancesearch?view=exchange-ps
         #>
 	}
 	
@@ -767,13 +826,26 @@ class SecurityAndComplianceClient {
             # Establish session to remote
             $this.CreateSession()
             # Import and Execute command
-            Import-PSSession -Session $this.session -CommandName Remove-ComplianceSearch
+            Import-PSSession -Session $this.session -CommandName Remove-ComplianceSearch -AllowClobber
             Remove-ComplianceSearch -Identity $search_name -Confirm:$false
         }
         finally {
             # Close session to remote
             $this.CloseSession()
         }
+       <#
+            .DESCRIPTION
+            Remove compliance search by name from the Security & Compliance Center.
+
+            .PARAMETER search_name
+            The name of the compliance search.
+
+            .EXAMPLE
+            $client.RemoveSearch("new-search")
+            
+            .LINK
+            https://docs.microsoft.com/en-us/powershell/module/exchange/remove-compliancesearch?view=exchange-ps
+        #>
 	}
 
 	[array]ListSearch() {
@@ -781,7 +853,7 @@ class SecurityAndComplianceClient {
             # Establish session to remote
             $this.CreateSession()
             # Import and Execute command
-            Import-PSSession -Session $this.session -CommandName Get-ComplianceSearch
+            Import-PSSession -Session $this.session -CommandName Get-ComplianceSearch -AllowClobber
             $response = Get-ComplianceSearch 
             
             return $response
@@ -790,6 +862,19 @@ class SecurityAndComplianceClient {
             # Close session to remote
             $this.CloseSession()
         }
+       <#
+            .DESCRIPTION
+            List compliance searches in the Security & Compliance Center.
+
+            .EXAMPLE
+            $client.ListSearch()
+            
+            .OUTPUTS
+            array - Raw response.
+            
+            .LINK
+            https://docs.microsoft.com/en-us/powershell/module/exchange/get-compliancesearch?view=exchange-ps
+        #>
 	}
 
 	[psobject]GetSearch([string]$search_name) {
@@ -797,7 +882,7 @@ class SecurityAndComplianceClient {
             # Establish session to remote
             $this.CreateSession()
             # Import and Execute command
-            Import-PSSession -Session $this.session -CommandName Get-ComplianceSearch
+            Import-PSSession -Session $this.session -CommandName Get-ComplianceSearch -AllowClobber
             $response = Get-ComplianceSearch -Identity $search_name
             return $response
         }
@@ -805,6 +890,19 @@ class SecurityAndComplianceClient {
             # Close session to remote
             $this.CloseSession()
         }
+        <#
+            .DESCRIPTION
+            Get compliance search by name from the Security & Compliance Center.
+
+            .EXAMPLE
+            $client.GetSearch("new-search")
+            
+            .OUTPUTS
+            psobject - Raw response.
+            
+            .LINK
+            https://docs.microsoft.com/en-us/powershell/module/exchange/get-compliancesearch?view=exchange-ps
+        #>
 	}
 
     StartSearch([string]$search_name) {
@@ -812,13 +910,23 @@ class SecurityAndComplianceClient {
             # Establish session to remote
             $this.CreateSession()
             # Import and Execute command
-            Import-PSSession -Session $this.session -CommandName Start-ComplianceSearch
+            Import-PSSession -Session $this.session -CommandName Start-ComplianceSearch -AllowClobber
             Start-ComplianceSearch -Identity $search_name -Confirm:$false -Force:$true
         }
         finally {
             # Close session to remote
             $this.CloseSession()
         }
+        <#
+            .DESCRIPTION
+            Start stopped, completed or not started compliance search in the Security & Compliance Center.
+
+            .EXAMPLE
+            $client.StartSearch("new-search")
+            
+            .LINK
+            https://docs.microsoft.com/en-us/powershell/module/exchange/start-compliancesearch?view=exchange-ps
+        #>
 	}
 
     StopSearch([string]$search_name) {
@@ -826,21 +934,31 @@ class SecurityAndComplianceClient {
             # Establish session to remote
             $this.CreateSession()
             # Import and Execute command
-            Import-PSSession -Session $this.session -CommandName Stop-ComplianceSearch 
+            Import-PSSession -Session $this.session -CommandName Stop-ComplianceSearch  -AllowClobber
             Stop-ComplianceSearch -Identity $search_name -Confirm:$false
         }
         finally {
             # Close session to remote
             $this.CloseSession()
         }
+        <#
+            .DESCRIPTION
+            Stop compliance search by name in the Security & Compliance Center.
+
+            .EXAMPLE
+            $client.StopSearch("new-search")
+            
+            .LINK
+            https://docs.microsoft.com/en-us/powershell/module/exchange/stop-compliancesearch?view=exchange-ps
+        #>
 	}
 
-    [array]NewSearchAction([string]$search_name, [string]$action, [string]$purge_type) {
+    [psobject]NewSearchAction([string]$search_name, [string]$action, [string]$purge_type) {
         try{
             # Establish session to remote
             $this.CreateSession()
             # Import and Execute command
-            Import-PSSession -Session $this.session -CommandName New-ComplianceSearchAction
+            Import-PSSession -Session $this.session -CommandName New-ComplianceSearchAction -AllowClobber
             $parameters = @{
                 "SearchName" = $search_name
             }
@@ -860,20 +978,56 @@ class SecurityAndComplianceClient {
             # Close session to remote
             $this.CloseSession()
         }
+        <#
+            .DESCRIPTION
+            Create compliance search action in the Security & Compliance Center.
+
+            .PARAMETER search_name
+            The name of the compliance search.
+            
+            .PARAMETER action
+            Search action type - Preview (Showing results) / Purge (Delete found emails)
+            
+            .PARAMETER purge_type
+            Used if action type is purge, Search action purge type - SoftDelete (allow recover) / HardDelete (not recoverable).
+
+            .EXAMPLE
+            $client.NewSearchAction("search-name", "Preview")
+            $client.NewSearchAction("search-name", "Purge", "HardDelete")
+            
+            .OUTPUTS
+            psobject - Raw response.
+            
+            .LINK
+            https://docs.microsoft.com/en-us/powershell/module/exchange/new-compliancesearchaction?view=exchange-ps
+        #>
 	}
 
-    RemoveSearchAction([string]$search_action_id) {
+    RemoveSearchAction([string]$search_action_name) {
         try{
             # Establish session to remote
             $this.CreateSession()
             # Import and Execute command
-            Import-PSSession -Session $this.session -CommandName Remove-ComplianceSearchAction
-            Remove-ComplianceSearchAction -Identity $search_action_id -Confirm:$false
+            Import-PSSession -Session $this.session -CommandName Remove-ComplianceSearchAction -AllowClobber
+            Remove-ComplianceSearchAction -Identity $search_action_name -Confirm:$false
         }
         finally {
             # Close session to remote
             $this.CloseSession()
         }
+        <#
+            .DESCRIPTION
+            Remove compliance search action from the Security & Compliance Center.
+
+            .PARAMETER search_action_name
+            The name of the compliance search action.
+
+            .EXAMPLE
+            $client.RemoveSearchAction("search-name")
+            
+            .LINK
+            https://docs.microsoft.com/en-us/powershell/module/exchange/remove-compliancesearchaction?view=exchange-ps
+        #>
 	}
 
     [array]ListSearchActions() {
@@ -881,7 +1035,7 @@ class SecurityAndComplianceClient {
             # Establish session to remote
             $this.CreateSession()
             # Import and Execute command
-            Import-PSSession -Session $this.session -CommandName Get-ComplianceSearchAction
+            Import-PSSession -Session $this.session -CommandName Get-ComplianceSearchAction -AllowClobber
             $response = Get-ComplianceSearchAction
             
             return $response
@@ -890,15 +1044,28 @@ class SecurityAndComplianceClient {
             # Close session to remote
             $this.CloseSession()
         }
+        <#
+            .DESCRIPTION
+            List all compliance search action in the Security & Compliance Center.
+
+            .EXAMPLE
+            $client.ListearchAction()
+            
+            .OUTPUTS
+            array - Raw response.
+            
+            .LINK
+            https://docs.microsoft.com/en-us/powershell/module/exchange/get-compliancesearchaction?view=exchange-ps
+        #>
 	}
 
-    [array]GetSearchAction([string]$search_action_id) {
+    [psobject]GetSearchAction([string]$search_action_name) {
         try{
             # Establish session to remote
             $this.CreateSession()
             # Import and Execute command
-            Import-PSSession -Session $this.session -CommandName Get-ComplianceSearchAction
-            $response = Get-ComplianceSearchAction -Identity $search_action_id
+            Import-PSSession -Session $this.session -CommandName Get-ComplianceSearchAction -AllowClobber
+            $response = Get-ComplianceSearchAction -Identity $search_action_name
             
             return $response
         }
@@ -906,6 +1073,19 @@ class SecurityAndComplianceClient {
             # Close session to remote
             $this.CloseSession()
         }
+        <#
+            .DESCRIPTION
+            Get compliance search action in the Security & Compliance Center.
+
+            .EXAMPLE
+            $client.GetSearchAction("search-name")
+            
+            .OUTPUTS
+            psobject - Raw response.
+            
+            .LINK
+            https://docs.microsoft.com/en-us/powershell/module/exchange/get-compliancesearchaction?view=exchange-ps
+        #>
 	}
 }
 
@@ -977,21 +1157,26 @@ function NewSearchCommand([SecurityAndComplianceClient]$client, [hashtable]$kwar
 function SetSearchCommand([SecurityAndComplianceClient]$client, [hashtable]$kwargs) {
     # Command arguemnts parsing
     $allow_not_found_exchange_locations = ConvertTo-Boolean $kwargs.allow_not_found_exchange_locations
-    $exchange_location = ArgToList $kwargs.exchange_location
-    $exchange_location_exclusion = ArgToList $kwargs.exchange_location_exclusion
-    $public_folder_location = ArgToList $kwargs.public_folder_location
-    $share_point_location = ArgToList $kwargs.exchange_location
-    $share_point_location_exclusion = ArgToList $kwargs.exchange_location_exclusion
+    $add_exchange_location = ArgToList $kwargs.add_exchange_location
+    $add_exchange_location_exclusion = ArgToList $kwargs.add_exchange_location_exclusion
+    $add_public_folder_location = ArgToList $kwargs.add_public_folder_location
+    $add_share_point_location = ArgToList $kwargs.add_share_point_location
+    $add_share_point_location_exclusion = ArgToList $kwargs.add_share_point_location_exclusion
+    $remove_exchange_location = ArgToList $kwargs.remove_exchange_location
+    $remove_exchange_location_exclusion = ArgToList $kwargs.remove_exchange_location_exclusion
+    $remove_public_folder_location = ArgToList $kwargs.remove_public_folder_location
+    $remove_share_point_location = ArgToList $kwargs.remove_share_point_location
+    $remove_share_point_location_exclusion = ArgToList $kwargs.remove_share_point_location_exclusion
+    # Set operation doesn't return any output
+    $client.SetSearch($kwargs.search_name, $kwargs.kql, $kwargs.description, $allow_not_found_exchange_locations,
+                      $add_exchange_location, $add_exchange_location_exclusion, $add_public_folder_location, $add_share_point_location, $add_share_point_location_exclusion,
+                      $remove_exchange_location, $remove_exchange_location_exclusion, $remove_public_folder_location, $remove_share_point_location, $remove_share_point_location_exclusion)
     # Raw response
-    $raw_response = $client.NewSearch($kwargs.search_name, $kwargs.case, $kwargs.kql, $kwargs.description, $allow_not_found_exchange_locations,
-                                      $exchange_location, $exchange_location_exclusion, $public_folder_location, $share_point_location, $share_point_location_exclusion)
+    $raw_response = @{}
     # Human readable
-    $md_columns = $raw_response | Select-Object -Property Name, Description, CreatedBy, LastModifiedTime, ContentMatchQuery
-	$human_readable = TableToMarkdown $md_columns  "Security And Compliance - New search '$($kwargs.search_name)' created"
+	$human_readable = "Security And Compliance - Search **$($kwargs.search_name)** modified!"
     # Entry context
-    $entry_context = @{
-        $global:COMPLAIANCE_SEARCH_ENTRY_CONTEXT = ParseSearchToEntryContext $raw_response
-    }
+    $entry_context = @{}
 
 	return $human_readable, $entry_context, $raw_response
 }
@@ -1083,7 +1268,7 @@ function NewSearchActionCommand([SecurityAndComplianceClient]$client, [hashtable
     $human_readable = TableToMarkdown $md_columns "Security And Compliance - search action '$($raw_response.Name)' created"
     # Entry context
     $entry_context = @{ 
-        $global:COMPLAIANCE_SEARCH_ACTIONS_ENTRY_CONTEXT = ParseSearchActionsToEntryContext $raw_response
+        $global:COMPLAIANCE_SEARCH_ACTIONS_ENTRY_CONTEXT = ParseSearchActionToEntryContext $raw_response
     }
 
 	return $human_readable, $entry_context, $raw_response
@@ -1093,11 +1278,11 @@ function NewSearchActionCommand([SecurityAndComplianceClient]$client, [hashtable
 
 function RemoveSearchActionCommand([SecurityAndComplianceClient]$client, [hashtable]$kwargs) {
     # Remove operation doesn't return any output
-    $client.RemoveSearchAction($kwargs.search_action_id)
+    $client.RemoveSearchAction($kwargs.search_action_name)
     # Raw response
     $raw_response = @{}
     # Human readable
-    $human_readable = "Security And Compliance - search action **$($kwargs.search_action_id)** removed!"
+    $human_readable = "Security And Compliance - search action **$($kwargs.search_action_name)** removed!"
     # Entry context
     $entry_context = @{}
 
@@ -1105,14 +1290,20 @@ function RemoveSearchActionCommand([SecurityAndComplianceClient]$client, [hashta
 }
 
 function GetSearchActionCommand([SecurityAndComplianceClient]$client, [hashtable]$kwargs) {
+    # Command arguemnts parsing
+    $results = ConvertTo-Boolean $kwargs.results
     # Raw response
-    $raw_response = $client.GetSearchAction($kwargs.search_action_id)
+    $raw_response = $client.GetSearchAction($kwargs.search_action_name)
     # Human readable
     $md_columns = $raw_response | Select-Object -Property Name, SearchName, Action, LastModifiedTime, RunBy, JobEndTime, Status
-	$human_readable = TableToMarkdown $md_columns "Security And Compliance - search action '$($kwargs.search_action_id)'"
+	$human_readable = TableToMarkdown $md_columns "Security And Compliance - search action '$($kwargs.search_action_name)'"
+    # Human readable - Statistics
+    if ($raw_response.Results -and $results) {
+        $human_readable += TableToMarkdown $(ParseResults $raw_response.Results) "Search action results"
+    }
     # Entry context
     $entry_context = @{ 
-        $global:COMPLAIANCE_SEARCH_ACTIONS_ENTRY_CONTEXT = ParseSearchActionsToEntryContext $raw_response
+        $global:COMPLAIANCE_SEARCH_ACTIONS_ENTRY_CONTEXT = ParseSearchActionToEntryContext $raw_response
     }
 
 	return $human_readable, $entry_context, $raw_response
@@ -1126,7 +1317,7 @@ function ListSearchActionsCommand([SecurityAndComplianceClient]$client, [hashtab
     # Entry context
     $search_actions_ec = New-Object System.Collections.Generic.List[System.Object]
     foreach ($search in $raw_response) { 
-        $ec = ParseSearchActionsToEntryContext $search
+        $ec = ParseSearchActionToEntryContext $search
         $search_actions_ec.Add($ec)
     }
 	$entry_context = @{ 
@@ -1148,8 +1339,8 @@ function Main {
     $command = $Demisto.GetCommand()
     $command_arguments = $Demisto.Args()
     $integration_params = $Demisto.Params()
-    $proxy = ConvertTo-Boolean $integration_params.proxy
-    $insecure = ConvertTo-Boolean $integration_params.insecure
+    $proxy = !(ConvertTo-Boolean $integration_params.proxy)
+    $insecure = !(ConvertTo-Boolean $integration_params.insecure)
 	
 	try {
         # Creating Compliance and search client
@@ -1179,6 +1370,9 @@ function Main {
 			"$global:COMMAND_PREFIX-new-search" {
 				($human_readable, $entry_context, $raw_response) = NewSearchCommand $cs_client $command_arguments   
 			}
+            "$global:COMMAND_PREFIX-set-search" {
+				($human_readable, $entry_context, $raw_response) = SetSearchCommand $cs_client $command_arguments   
+			}
 			"$global:COMMAND_PREFIX-remove-search" {
 				($human_readable, $entry_context, $raw_response) = RemoveSearchCommand $cs_client $command_arguments
 			}
@@ -1200,7 +1394,7 @@ function Main {
             "$global:COMMAND_PREFIX-remove-search-action" {
 				($human_readable, $entry_context, $raw_response) = RemoveSearchActionCommand $cs_client $command_arguments
 			}
-            "$global:COMMAND_PREFIX-list-search-actions" {
+            "$global:COMMAND_PREFIX-list-search-action" {
 				($human_readable, $entry_context, $raw_response) = ListSearchActionsCommand $cs_client $command_arguments
 			}
             "$global:COMMAND_PREFIX-get-search-action" {
