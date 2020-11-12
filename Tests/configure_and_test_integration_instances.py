@@ -1112,7 +1112,7 @@ def install_packs(build, prints_manager, pack_ids=None):
 def configure_server_instances(build: Build, tests_for_iteration, all_new_integrations, modified_integrations,
                                prints_manager):
     old_module_instances = []
-    brand_new_integrations = []
+    new_module_instances = []
     testing_client = build.servers[0].client
     for test in tests_for_iteration:
         integrations = get_integrations_for_test(test, build.skipped_integrations_conf)
@@ -1155,20 +1155,48 @@ def configure_server_instances(build: Build, tests_for_iteration, all_new_integr
             continue
         prints_manager.execute_thread_prints(0)
 
-        for integration in integrations_to_configure:
-            placeholders_map = {'%%SERVER_HOST%%': build.servers[0]}
-            module_instance = configure_integration_instance(integration, testing_client, prints_manager,
-                                                             placeholders_map)
-            if module_instance:
-                old_module_instances.append(module_instance)
+        old_module_instances_for_test, new_module_instances_for_test = configure_old_and_new_integrations(
+            build,
+            integrations_to_configure,
+            new_integrations,
+            prints_manager,
+            testing_client)
 
-        for integration in new_integrations:
-            placeholders_map = {'%%SERVER_HOST%%': build.servers[0]}
-            module_instance = configure_integration_instance(integration, testing_client, prints_manager,
-                                                             placeholders_map)
-            if module_instance:
-                brand_new_integrations.append(module_instance)
-    return old_module_instances, brand_new_integrations
+        old_module_instances.extend(old_module_instances_for_test)
+        new_module_instances.extend(new_module_instances_for_test)
+        
+    return old_module_instances, new_module_instances
+
+
+def configure_old_and_new_integrations(build: Build,
+                                       old_integrations_to_configure: list,
+                                       new_integrations_to_configure: list,
+                                       prints_manager: ParallelPrintsManager,
+                                       demisto_client: demisto_client) -> tuple:
+    """
+    Configures old and new integrations in the server configured in the demisto_client.
+    Args:
+        build: The build object
+        old_integrations_to_configure: Integrations to configure that are already exists
+        new_integrations_to_configure: Integrations to configure that were created in this build
+        prints_manager: A prints manager object
+        demisto_client: A demisto client
+    """
+    old_modules_instances = []
+    new_modules_instances = []
+    for integration in old_integrations_to_configure:
+        placeholders_map = {'%%SERVER_HOST%%': build.servers[0]}
+        module_instance = configure_integration_instance(integration, demisto_client, prints_manager,
+                                                         placeholders_map)
+        if module_instance:
+            old_modules_instances.append(module_instance)
+    for integration in new_integrations_to_configure:
+        placeholders_map = {'%%SERVER_HOST%%': build.servers[0]}
+        module_instance = configure_integration_instance(integration, demisto_client, prints_manager,
+                                                         placeholders_map)
+        if module_instance:
+            new_modules_instances.append(module_instance)
+    return old_modules_instances, new_modules_instances
 
 
 def instance_testing(build: Build, all_module_instances, prints_manager, pre_update):
